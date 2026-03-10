@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+scikit-learn
+pandas
+numpy
+matplotlib
+PyYAML
+requests
+python-multipart
+azure-storage-blob
