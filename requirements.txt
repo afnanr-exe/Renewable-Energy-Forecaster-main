@@ -1,12 +1,10 @@
 fastapi
 uvicorn
-scikit-learn
 pandas
-numpy
+scikit-learn
 matplotlib
 PyYAML
 requests
 python-multipart
 azure-storage-blob
 aiofiles
-joblib

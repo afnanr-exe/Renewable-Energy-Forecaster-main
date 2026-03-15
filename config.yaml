@@ -1,16 +1,7 @@
 markets:
   ieso:
     xml_dir: "/app/data/ieso/xml/"
-    default_city: "Goderich"
     timezone: "UTC"
-
   aeso:
     csv_dir: "/app/data/aeso_rawcsv"
-    default_city: "Red Deer"
     timezone: "America/Edmonton"
-    blob_container: "aeso-data" # Name of your Blob container
-
-storage:
-  output_dir: "/app/output"
-  plots_dir: "/app/output/plots"
-  models_dir: "/app/output/models"

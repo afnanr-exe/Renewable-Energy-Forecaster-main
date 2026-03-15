@@ -2,12 +2,13 @@ import os
 from enum import Enum
 from typing import List, Optional
 
-# Added BackgroundTasks to imports
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, BackgroundTasks
 from fastapi.staticfiles import StaticFiles
 
+# Imports from the root-level folders
 from services.universal_pipeline import UniversalPipeline
 
+# BASE_DIR is the root project folder (one level up from /app)
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 app = FastAPI()
@@ -26,10 +27,7 @@ class Province(str, Enum):
     ontario = "ontario"
     other   = "other"
 
-DEFAULT_IESO_CITY = "Goderich"
-DEFAULT_AESO_CITY = "Red Deer"
-
-PROVINCE_TIMEZONE: dict[Province, str] = {
+PROVINCE_TIMEZONE = {
     Province.alberta: "America/Edmonton",
     Province.ontario: "UTC",
     Province.other:   "UTC",
@@ -38,9 +36,10 @@ PROVINCE_TIMEZONE: dict[Province, str] = {
 def to_url_path(abs_path: str) -> str:
     if not abs_path: return abs_path
     try:
-        rel = os.path.relpath(abs_path, BASE_DIR).replace("\\", "/")
+        # Converts /app/output/plots/... to /output/plots/... for the browser
+        rel = os.path.relpath(abs_path, "/app").replace("\\", "/")
         return f"/{rel}"
-    except ValueError:
+    except:
         return abs_path
 
 def convert_paths(result: dict) -> dict:
@@ -55,52 +54,35 @@ def convert_paths(result: dict) -> dict:
         if key in result: result[key] = to_url_path(result[key])
     return result
 
-# ── UPDATED API endpoints ──────────────────────────────────────
-
 @app.get("/run-ieso")
 async def run_ieso(background_tasks: BackgroundTasks):
-    # Runs in background to prevent Azure 504 Timeout
-    background_tasks.add_task(pipeline.run_market, "ieso", city=DEFAULT_IESO_CITY)
-    return {"status": "started", "message": "IESO Pipeline running in background. Check Azure logs."}
+    background_tasks.add_task(pipeline.run_market, "ieso", city="Goderich")
+    return {"status": "started", "message": "IESO Pipeline started. Check Azure logs for progress."}
 
 @app.get("/run-aeso")
 async def run_aeso(background_tasks: BackgroundTasks):
-    # Runs in background to prevent Azure 504 Timeout
-    background_tasks.add_task(pipeline.run_market, "aeso", city=DEFAULT_AESO_CITY)
-    return {"status": "started", "message": "AESO Pipeline running in background. Check Azure logs."}
+    background_tasks.add_task(pipeline.run_market, "aeso", city="Red Deer")
+    return {"status": "started", "message": "AESO Pipeline started. Downloading blobs and processing..."}
 
 @app.post("/run-upload")
 def run_upload(
-    upload_mode:   UploadMode    = Form(...),
-    market_format: MarketFormat  = Form(...),
-    province:      Province      = Form(...),
-    other_city:    Optional[str] = Form(None),
-    files:         List[UploadFile] = File(...),
+    upload_mode: UploadMode = Form(...),
+    market_format: MarketFormat = Form(...),
+    province: Province = Form(...),
+    other_city: Optional[str] = Form(None),
+    files: List[UploadFile] = File(...),
 ):
-    # Keeping upload synchronous so user sees plots immediately
-    file_format = "csv" if market_format == MarketFormat.aeso else "xml"
-    if province == Province.ontario: final_city = DEFAULT_IESO_CITY
-    elif province == Province.alberta: final_city = DEFAULT_AESO_CITY
-    else:
-        if not other_city: raise HTTPException(status_code=400, detail="Provide a city name.")
-        final_city = other_city
-
     tz = PROVINCE_TIMEZONE[province]
-    return convert_paths(pipeline.run_market(
-        "upload", city=final_city, upload_mode=upload_mode.value,
-        file_format=file_format, files=files, timezone=tz
-    ))
+    # Upload remains synchronous so the user gets plots back immediately
+    res = pipeline.run_market(
+        "upload", city=other_city or "Default", upload_mode=upload_mode.value,
+        file_format="csv" if market_format == "aeso" else "xml",
+        files=files, timezone=tz
+    )
+    return convert_paths(res)
 
-@app.get("/run-forecast")
-def run_forecast_endpoint(market: str, city: str):
-    from services.forecast_service import run_forecast
-    try:
-        return run_forecast(market, city)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-# ── Static file mounts ─────────────────────────────────────────
-_output_dir   = "/app/output" # Fixed to match Azure Mount Path
+# Absolute paths for Azure Mounts
+_output_dir = "/app/output"
 _frontend_dir = os.path.join(BASE_DIR, "frontend")
 
 os.makedirs(_output_dir, exist_ok=True)
