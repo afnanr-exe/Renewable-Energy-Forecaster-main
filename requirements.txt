@@ -8,3 +8,5 @@ PyYAML
 requests
 python-multipart
 azure-storage-blob
+aiofiles
+joblib

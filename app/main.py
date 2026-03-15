@@ -2,7 +2,8 @@ import os
 from enum import Enum
 from typing import List, Optional
 
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+# Added BackgroundTasks to imports
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, BackgroundTasks
 from fastapi.staticfiles import StaticFiles
 
 from services.universal_pipeline import UniversalPipeline
@@ -12,81 +13,61 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 app = FastAPI()
 pipeline = UniversalPipeline()
 
-
 class UploadMode(str, Enum):
     single = "single"
     multi  = "multi"
 
-
 class MarketFormat(str, Enum):
     aeso = "aeso"
     ieso = "ieso"
-
 
 class Province(str, Enum):
     alberta = "alberta"
     ontario = "ontario"
     other   = "other"
 
-
 DEFAULT_IESO_CITY = "Goderich"
 DEFAULT_AESO_CITY = "Red Deer"
 
-# Maps each province to the timezone used when fetching weather for uploaded data.
-# Must match the timezone the source data was recorded in so timestamps align.
 PROVINCE_TIMEZONE: dict[Province, str] = {
-    Province.alberta: "America/Edmonton",   # AESO data is MST (UTC-7)
-    Province.ontario: "UTC",                # IESO data timestamps are UTC
-    Province.other:   "UTC",               # safe default; user bears responsibility
+    Province.alberta: "America/Edmonton",
+    Province.ontario: "UTC",
+    Province.other:   "UTC",
 }
 
-
 def to_url_path(abs_path: str) -> str:
-    """Convert an absolute path under BASE_DIR to a /output/... URL the browser can fetch."""
-    if not abs_path:
-        return abs_path
+    if not abs_path: return abs_path
     try:
         rel = os.path.relpath(abs_path, BASE_DIR).replace("\\", "/")
         return f"/{rel}"
     except ValueError:
-        return abs_path  # different drive on Windows — return as-is
-
+        return abs_path
 
 def convert_paths(result: dict) -> dict:
-    """
-    Rewrite all absolute plot/CSV paths in the pipeline result to
-    browser-accessible URL paths.
-
-    Guards against None and {"skipped": True} model results so that
-    a single-fuel-type upload (where one model is skipped) does not crash.
-    """
     for fuel in ("wind", "solar"):
         fuel_data = result.get(fuel)
-        # Skip None (not returned) or skipped-model sentinel
-        if not fuel_data or fuel_data.get("skipped"):
-            continue
+        if not fuel_data or fuel_data.get("skipped"): continue
         for model in ("linear", "polynomial"):
             m = fuel_data.get(model) or {}
             for key in ("scatter_plot", "timeseries_plot"):
-                if key in m:
-                    m[key] = to_url_path(m[key])
+                if key in m: m[key] = to_url_path(m[key])
     for key in ("master_path", "wind_csv", "solar_csv"):
-        if key in result:
-            result[key] = to_url_path(result[key])
+        if key in result: result[key] = to_url_path(result[key])
     return result
 
-
-# ── API endpoints ──────────────────────────────────────────────────────────────
+# ── UPDATED API endpoints ──────────────────────────────────────
 
 @app.get("/run-ieso")
-def run_ieso():
-    return convert_paths(pipeline.run_market("ieso", city=DEFAULT_IESO_CITY))
-
+async def run_ieso(background_tasks: BackgroundTasks):
+    # Runs in background to prevent Azure 504 Timeout
+    background_tasks.add_task(pipeline.run_market, "ieso", city=DEFAULT_IESO_CITY)
+    return {"status": "started", "message": "IESO Pipeline running in background. Check Azure logs."}
 
 @app.get("/run-aeso")
-def run_aeso():
-    return convert_paths(pipeline.run_market("aeso", city=DEFAULT_AESO_CITY))
-
+async def run_aeso(background_tasks: BackgroundTasks):
+    # Runs in background to prevent Azure 504 Timeout
+    background_tasks.add_task(pipeline.run_market, "aeso", city=DEFAULT_AESO_CITY)
+    return {"status": "started", "message": "AESO Pipeline running in background. Check Azure logs."}
 
 @app.post("/run-upload")
 def run_upload(
@@ -96,60 +77,32 @@ def run_upload(
     other_city:    Optional[str] = Form(None),
     files:         List[UploadFile] = File(...),
 ):
+    # Keeping upload synchronous so user sees plots immediately
     file_format = "csv" if market_format == MarketFormat.aeso else "xml"
-
-    if province == Province.ontario:
-        final_city = DEFAULT_IESO_CITY
-    elif province == Province.alberta:
-        final_city = DEFAULT_AESO_CITY
+    if province == Province.ontario: final_city = DEFAULT_IESO_CITY
+    elif province == Province.alberta: final_city = DEFAULT_AESO_CITY
     else:
-        if not other_city:
-            raise HTTPException(
-                status_code=400,
-                detail="Please provide a city name when selecting 'other'.",
-            )
+        if not other_city: raise HTTPException(status_code=400, detail="Provide a city name.")
         final_city = other_city
 
-    if upload_mode == UploadMode.single and len(files) != 1:
-        raise HTTPException(status_code=400, detail="Single-file mode requires exactly 1 file.")
-    if upload_mode == UploadMode.multi and len(files) < 2:
-        raise HTTPException(status_code=400, detail="Multi-file mode requires at least 2 files.")
-
     tz = PROVINCE_TIMEZONE[province]
-
-    # ValueError/RuntimeError are caught inside run_market and returned as HTTPException
     return convert_paths(pipeline.run_market(
-        "upload",
-        city=final_city,
-        upload_mode=upload_mode.value,
-        file_format=file_format,
-        files=files,
-        timezone=tz,
+        "upload", city=final_city, upload_mode=upload_mode.value,
+        file_format=file_format, files=files, timezone=tz
     ))
-
 
 @app.get("/run-forecast")
 def run_forecast_endpoint(market: str, city: str):
     from services.forecast_service import run_forecast
     try:
         return run_forecast(market, city)
-    except FileNotFoundError as e:
-        raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Forecast error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
-
-# ── Static file mounts (must come after all API route definitions) ─────────────
-
-_output_dir  = os.path.join(BASE_DIR, "output")
-_plots_dir   = os.path.join(_output_dir, "plots")
+# ── Static file mounts ─────────────────────────────────────────
+_output_dir   = "/app/output" # Fixed to match Azure Mount Path
 _frontend_dir = os.path.join(BASE_DIR, "frontend")
 
-os.makedirs(_plots_dir,    exist_ok=True)
-os.makedirs(_frontend_dir, exist_ok=True)
-
-# Serve output/ at /output — plots and CSVs
-app.mount("/output", StaticFiles(directory=_output_dir),  name="output")
-
-# Serve frontend/ at / — must be last so API routes above take priority
+os.makedirs(_output_dir, exist_ok=True)
+app.mount("/output", StaticFiles(directory=_output_dir), name="output")
 app.mount("/", StaticFiles(directory=_frontend_dir, html=True), name="frontend")
